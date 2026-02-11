@@ -26,6 +26,7 @@ public class EventLogService {
     private final AlfrescoService alfrescoService;
     private final EventLogRepository eventLogRepository;
     private final AlfrescoMapper alfrescoMapper;
+    private final com.reindex.report.repository.SyncHistoryRepository syncHistoryRepository;
 
     /**
      * Recupera i documenti da Alfresco e li restituisce come mappa di eventi
@@ -94,7 +95,21 @@ public class EventLogService {
         // 3. Controllo passaggio dei giorni (eventi sintetici)
         int dayChangeEvents = checkForDayChanges(alfrescoNodes);
 
-        return savedCount + deletionEvents + dayChangeEvents;
+        int totalNewEvents = savedCount + deletionEvents + dayChangeEvents;
+
+        // 4. Salvataggio storico sincronizzazione per metriche
+        try {
+            com.reindex.report.entity.SyncHistory history = com.reindex.report.entity.SyncHistory.builder()
+                    .dataEsecuzione(LocalDateTime.now())
+                    .documentiAttivi(alfrescoNodes.size())
+                    .nuoviEventi(totalNewEvents)
+                    .build();
+            syncHistoryRepository.save(history);
+        } catch (Exception e) {
+            log.error("Errore durante il salvataggio dello storico sincronizzazione", e);
+        }
+
+        return totalNewEvents;
     }
 
     /**
