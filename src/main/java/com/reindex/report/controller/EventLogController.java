@@ -32,7 +32,7 @@ public class EventLogController {
 
     /**
      * Avvia il processo di importazione e sincronizzazione degli eventi da Alfresco
-     * a MongoDB.
+     * al database persistente.
      */
     @PostMapping("/import/{nodeId}")
     public ResponseEntity<String> importEvents(@PathVariable String nodeId) {

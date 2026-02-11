@@ -66,7 +66,7 @@ public class AlfrescoMapper {
     }
 
     /**
-     * Converte un nodo Alfresco nell'entità EventLog per MongoDB.
+     * Converte un nodo Alfresco nell'entità EventLog per il database.
      */
     public EventLog toEntity(ResultNode entry) {
         Map<String, Object> map = toMap(entry);
