@@ -1,82 +1,205 @@
-# � Guida Completa al Progetto: 
+# 📊 Alfresco Reporting & Monitoring System
 
-Benvenuto! Se sei qui è perché vuoi capire esattamente cosa succede "sotto il cofano". In questa guida non ci limiteremo ai titoli, ma analizzeremo la logica di ogni singola parte del progetto, spiegandoti come i vari pezzi collaborano per monitorare Alfresco.
+Benvenuto nella documentazione ufficiale del progetto `report-main`.
+Questa applicazione funge da ponte tra **Alfresco** e il nostro sistema di monitoraggio basato su **PostgreSQL** e **Grafana**.
 
----
-
-## � 1. Lo Scheduler: L'orologio del sistema (`EventScheduler`)
-
-Tutto inizia qui. Immagina lo scheduler come un guardiano che ogni 10 secondi si sveglia e controlla se ci sono novità.
-
-- **Cosa fa**: Incrementa un contatore di esecuzioni (per farci sapere che è vivo) e segna l'ora esatta in cui ha iniziato.
-- **La scelta del nodo**: Legge dalle configurazioni quale cartella di Alfresco deve monitorare. Se non la trova o è scritta male, si ferma subito per non fare danni.
-- **L'azione**: Chiama il servizio degli eventi per importare i dati. Se trova qualcosa di nuovo, lo scrive nei log con un tono colloquiale (es. *"Trovati 5 nuovi eventi"*).
-- **Le statistiche**: Alla fine di ogni giro, ricalcola i grafici che vediamo su Grafana: conta quanti PDF abbiamo, quanti file Word, e quanti eventi ci sono in totale su MongoDB.
+Il sistema importa regolarmente i metadati dei documenti da Alfresco, li storicizza su un database relazionale e calcola metriche avanzate (come i giorni di giacenza) per la visualizzazione su dashboard.
 
 ---
 
-## 🗺️ 2. Il Mapper: Il traduttore universale (`AlfrescoMapper`)
+## 🏗️ Architettura del Sistema
 
-Alfresco parla una lingua complicata (nodi, proprietà tecniche). Abbiamo creato questo componente per "tradurre" quelle informazioni in qualcosa di semplice per noi.
-
-- **Dati grezzi -> Mappa**: Prende un nodo di Alfresco e lo trasforma in una mappa di dati leggibili. Estrae il nome dell'utente, il nome del file, e soprattutto le date, trasformandole dal formato tecnico a quello che usiamo in Italia.
-- **Creazione Entità**: Prepara l'oggetto `EventLog` pronto per essere salvato nel database. Qui avviene un calcolo fondamentale: confronta la data del file con quella odierna per capire quanti "giorni sono trascorsi".
-- **Preparazione Report**: Costruisce il `FileReportDTO`. Oltre ai dati base, aggiunge "l'intelligenza": calcola una data di scadenza (fissata a 90 giorni dalla creazione) per avvisare chi deve gestire i documenti.
-
----
-
-## 🧠 3. EventLogService: Il cervello dell'applicazione
-
-Questo è il componente più complesso perché prende le decisioni.
-
-### La sincronizzazione (`importEventsWithoutDuplicates`)
-Quando interroga Alfresco, riceve una lista di file. Ma non vogliamo salvare tutto ogni volta!
-1. **Filtro**: confronta quello che arriva da Alfresco con quello che abbiamo già su MongoDB.
-2. **Salvataggio**: salva solo ciò che è "nuovo" (basandosi su utente, data ed evento).
-3. **Gestione Cancellazioni**: se un file non c'è più su Alfresco ma lo avevamo segnato prima, il sistema crea automaticamente un "Evento di Cancellazione" su MongoDB per non perdere la traccia storica.
-
-### Il trucco del tempo (`checkForDayChanges`)
-Anche se nessuno modifica un file, i "giorni trascorsi" aumentano ogni notte. 
-- Lo scheduler controlla se il numero di giorni calcolato oggi è maggiore di quello salvato ieri. 
-- Se sì, aggiorna il record su MongoDB come se fosse successo un nuovo evento di "aggiornamento temporale". Questo garantisce che i report siano sempre precisi ogni mattina.
+Il sistema si basa su tre componenti principali:
+1.  **Spring Boot Application** (`report-main`): Il cuore pulsante. Interroga Alfresco tramite API REST, elabora i dati e li salva su DB.
+2.  **PostgreSQL**: Il database relazionale che sostituisce MongoDB. Qui vengono salvati sia gli eventi di audit (`event_log`) che lo storico delle sincronizzazioni (`sync_history`).
+3.  **Grafana**: L'interfaccia di visualizzazione che legge direttamente da PostgreSQL per creare grafici e report in tempo reale.
 
 ---
 
-## 📡 4. I Servizi di Integrazione e Visualizzazione
+## 📂 Struttura del Codice
 
-### `AlfrescoService`
-È il braccio operativo che esegue le ricerche su Alfresco. Non fa ragionamenti, esegue solo gli ordini: *"Cerca tutti i documenti sotto questa cartella"*.
+Guida rapida alle classi principali del progetto:
 
-### `FileReportService`
-Prende i dati "tradotti" dal Mapper e li impacchetta per i Controller. È quello che permette di generare la lista che l'utente vede a schermo.
+### 1. Core & Configurazione
+*   **`ReportApplication`**: Punto di ingresso (`main`). Configura l'avvio e disabilita la sicurezza di default di Spring.
+
+### 2. Il Motore (Scheduler)
+*   **`EventScheduler`**: L'orologio del sistema. Ogni 10 secondi (o come configurato), avvia il processo di sincronizzazione chiamando il service.
+
+### 3. Servizi (Logica di Business)
+*   **`EventLogService`**: Il "cervello". Gestisce la logica di sincronizzazione:
+    *   *Deduplicazione*: Evita di salvare eventi già presenti.
+    *   *Tracking Temporale*: Calcola i "giorni trascorsi" e crea eventi sintetici notturni ("Aggiornamento Statistiche").
+    *   *Cancellazioni*: Rileva documenti rimossi da Alfresco.
+    *   *Metriche*: Salva le statistiche di esecuzione nella tabella `sync_history` (documenti trovati, nuovi eventi, timestamp).
+*   **`AlfrescoService`**: Esegue le chiamate HTTP verso le API di Alfresco per cercare i documenti.
+*   **`FileReportService`**: Prepara i dati per i report richiesti via API (es. lista file scaduti).
+*   **`AlfrescoMapper`**: Traduce i JSON complessi di Alfresco nelle nostre entità Java (`EventLog`).
+
+### 4. Entità (Database)
+*   **`EventLog`**: Tabella principale. Usa un campo `jsonb` (`dettagli`) per conservare metadati flessibili (nome file, mimetype, dimensioni).
+*   **`SyncHistory`**: Tabella di servizio per tracciare ogni esecuzione dello scheduler (fondamentale per le dashboard di stato).
+
+### 5. API (Controller)
+*   **`EventLogController`**: Endpoint per monitoraggio e trigger manuale dell'importazione.
+*   **`FileReportController`**: Endpoint per estrarre report sui file.
+
+---
+
+## 🚀 Guida all'Installazione (Docker)
+
+Prerequisiti: **Docker** e **Java 17+**.
+
+### 1. Avviare PostgreSQL
+Esegui questo comando per creare il database:
+```bash
+docker run --name report-postgres -e POSTGRES_PASSWORD=reindex123 -p 5433:5432 -d postgres
+```
+*Nota: La porta esterna è **5433** per evitare conflitti con altri Postgres locali.*
+
+### 2. Collegare DBeaver (Opzionale)
+Per esplorare i dati manualmente:
+1.  Apri DBeaver -> Nuova Connessione -> PostgreSQL.
+2.  **Host**: `localhost`
+3.  **Port**: `5433`
+4.  **Database**: `postgres`
+5.  **User/Password**: `postgres` / `reindex123`
+
+### 3. Avviare Grafana
+```bash
+docker run -d -p 3000:3000 --name=grafana grafana/grafana
+```
+Accedi a `http://localhost:3000` (admin/admin).
+
+### 4. Avviare l'Applicazione
+Crea il file `src/main/resources/application.properties` con le credenziali (vedi sezione Configurazione in fondo), poi lancia:
+```bash
+./mvnw spring-boot:run
+```
 
 ---
 
-## 🎮 5. I Controller: I cancelletti d'ingresso
+## 📊 Configurazione Completa Grafana
 
-Sono gli endpoint che permettono a un essere umano (o a un altro software) di parlare con la nostra app.
+Dopo aver avviato Grafana, segui questi passaggi per creare la Dashboard di monitoraggio.
 
-- **`EventLogController`**: Permette di vedere cosa c'è "live" su Alfresco o di forzare un'importazione a mano (magari perché non vuoi aspettare lo scheduler di 10 secondi).
-- **`FileReportController`**: Restituisce la lista pulita e ordinata dei file con tutti i calcoli fatti (scadenza, giorni passati, ecc.).
+### 1. Aggiungere Data Source PostgreSQL
+1.  Vai su Grafana -> **Connections** -> **Data Sources**.
+2.  Clicca **Add new data source** -> Seleziona **PostgreSQL**.
+3.  Configura:
+    *   **Host**: `report-postgres:5432` (se Grafana è su Docker nella stessa rete) oppure `host.docker.internal:5433` (se Grafana è su host macchina).
+    *   **Database**: `postgres`
+    *   **User**: `postgres`
+    *   **Password**: `reindex123`
+    *   **TLS/SSL Mode**: `disable`
+4.  Clicca **Save & Test**.
+
+### 2. Query SQL per i Pannelli
+
+Ecco le query SQL pronte all'uso per i tuoi grafici.
+
+#### A. Totale Eventi (Counter)
+```sql
+SELECT count(*) FROM event_log;
+```
+
+#### B. Andamento Giornaliero per Tipo (Stacked Bar Chart)
+Mostra l'attività nel tempo, divisa per tipo di evento (Aggiunto, Modificato, ecc.).
+```sql
+SELECT
+  date_trunc('day', data) as time,
+  count(*) FILTER (WHERE evento = 'Aggiunto Documento') as "Aggiunti",
+  count(*) FILTER (WHERE evento = 'Modificato Documento') as "Modificati",
+  count(*) FILTER (WHERE evento = 'Eliminato Documento') as "Eliminati",
+  count(*) FILTER (WHERE evento = 'Aggiornamento Statistiche') as "Statistiche"
+FROM event_log
+-- Opzionale: WHERE to_char(data, 'YYYY-MM-DD') = '${giorno}'
+GROUP BY 1
+ORDER BY 1;
+```
+*Tip: Nelle opzioni del grafico, imposta **Stacking** su "Normal".*
+
+#### C. Distribuzione per Tipo File (MimeType) (Pie Chart)
+```sql
+SELECT 
+  dettagli->>'mimeType' as metric, 
+  count(*) as value
+FROM event_log 
+GROUP BY 1
+ORDER BY 2 DESC;
+```
+
+**🎨 Fix Colori (Per avere colori fissi basati sul tipo):**
+1. Nelle opzioni del pannello, vai su **Standard options** -> **Color scheme**.
+2. Seleziona **"Classic palette"**.
+3. *Opzionale*: Per forzare un colore specifico (es. PDF rosso), vai nel tab **Overrides** -> **Fields with name** -> Seleziona il mimetype -> Aggiungi proprietà **Color scheme** -> **Single color**.
+
+#### D. Documenti "Vecchi" (> 90 giorni) (Table)
+```sql
+SELECT
+  utente,
+  struttura,
+  (dettagli ->> 'giorniTrascorsi')::int as giorni
+FROM event_log
+WHERE (dettagli ->> 'giorniTrascorsi')::int > 90
+ORDER BY giorni DESC;
+```
+
+### 3. Statistiche di Sistema (Dallo Scheduler)
+Queste query usano la tabella `sync_history` per monitorare la salute del sistema.
+
+#### A. Documenti Attivi in Alfresco (Stat Panel)
+```sql
+SELECT documenti_attivi FROM sync_history ORDER BY data_esecuzione DESC LIMIT 1;
+```
+
+#### B. Counter Esecuzioni Scheduler (Stat Panel)
+```sql
+SELECT count(*) FROM sync_history;
+```
+
+#### C. Orario Ultima Sincronizzazione (Stat Panel)
+*Select type: **Timestamp***
+```sql
+SELECT data_esecuzione FROM sync_history ORDER BY data_esecuzione DESC LIMIT 1;
+```
 
 ---
 
-## � 6. Le Metriche: Il diario di bordo (`MetricsConfig`)
+## 🎛️ Filtri Dashboard (Variabili)
 
-Qui gestiamo come l'app racconta se stessa all'esterno (a Prometheus).
-- **Categorizzazione**: Invece di dire solo "file/pdf", il sistema raggruppa le estensioni in categorie umane (Immagini, Documenti Word, Excel).
-- **Serie Storica**: Registra quanti eventi accadono ogni giorno, così possiamo vedere nei grafici se ci sono picchi di attività (es. "Lunedì sono stati caricati 500 file").
-
----
-
-## 💡 In sintesi: Il viaggio di un dato
-1. Lo **Scheduler** si sveglia.
-2. L'**AlfrescoService** recupera i dati dal server.
-3. Il **Mapper** li traduce in "lingua umana".
-4. L'**EventLogService** decide se sono nuovi o se è solo passato un giorno.
-5. Se sono importanti, vengono salvati su **MongoDB**.
-6. Il **Controller** mostra il risultato all'utente.
-7. Le **Metriche** aggiornano i grafici per il monitoraggio.
+Per aggiungere un menu a tendina per filtrare per data:
+1.  Vai in **Dashboard Settings** -> **Variables** -> **Add variable**.
+2.  **Name**: `giorno` (tutto minuscolo).
+3.  **Data source**: PostgreSQL.
+4.  **Query**:
+    ```sql
+    SELECT DISTINCT to_char(data, 'YYYY-MM-DD') AS "__text", to_char(data, 'YYYY-MM-DD') AS "__value" FROM event_log ORDER BY 1 DESC;
+    ```
+5.  Usa la variabile nei pannelli aggiungendo alla query:
+    ```sql
+    WHERE to_char(data, 'YYYY-MM-DD') = '${giorno}'
+    ```
 
 ---
-*Questa documentazione è pensata per farti capire la logica profonda. Ogni riga di codice che scriverai dovrà incastrarsi in questo flusso.*
+
+## 🔧 Configurazione Applicazione
+
+Le proprietà principali in `src/main/resources/application.properties`:
+
+```properties
+# Porta Server
+server.port=8081
+
+# Connessione DB
+spring.datasource.url=jdbc:postgresql://localhost:5433/postgres
+spring.datasource.username=postgres
+spring.datasource.password=reindex123
+spring.jpa.show-sql=false
+
+# Connessione Alfresco
+content.service.url=http://localhost:8080
+content.service.security.basicAuth.username=admin
+content.service.security.basicAuth.password=admin
+scheduler.node-id=INSERISCI_QUI_IL_TUO_NODE_ID
+```
